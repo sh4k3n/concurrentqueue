@@ -262,6 +262,8 @@ namespace details {
 // otherwise.
 struct ConcurrentQueueDefaultTraits
 {
+	using Allocator = std::allocator<char>;
+	
 	// General-purpose size type. std::size_t is strongly recommended.
 	typedef std::size_t size_t;
 	
@@ -328,8 +330,8 @@ struct ConcurrentQueueDefaultTraits
 	static inline void* (malloc)(size_t size) { return WORKAROUND_malloc(size); }
 	static inline void (free)(void* ptr) { return WORKAROUND_free(ptr); }
 #else
-	static inline void* malloc(size_t size) { return std::malloc(size); }
-	static inline void free(void* ptr) { return std::free(ptr); }
+	static inline void* malloc(Allocator& /*allocator*/, size_t size) { return std::malloc(size); }
+	static inline void free(Allocator& /*allocator*/, void* ptr) { return std::free(ptr); }
 #endif
 #else
 	// Debug versions when running under the Relacy race detector (ignore
@@ -714,7 +716,7 @@ public:
 	static_assert((IMPLICIT_INITIAL_INDEX_SIZE > 1) && !(IMPLICIT_INITIAL_INDEX_SIZE & (IMPLICIT_INITIAL_INDEX_SIZE - 1)), "Traits::IMPLICIT_INITIAL_INDEX_SIZE must be a power of 2 (and greater than 1)");
 	static_assert((INITIAL_IMPLICIT_PRODUCER_HASH_SIZE == 0) || !(INITIAL_IMPLICIT_PRODUCER_HASH_SIZE & (INITIAL_IMPLICIT_PRODUCER_HASH_SIZE - 1)), "Traits::INITIAL_IMPLICIT_PRODUCER_HASH_SIZE must be a power of 2");
 	static_assert(INITIAL_IMPLICIT_PRODUCER_HASH_SIZE == 0 || INITIAL_IMPLICIT_PRODUCER_HASH_SIZE >= 1, "Traits::INITIAL_IMPLICIT_PRODUCER_HASH_SIZE must be at least 1 (or 0 to disable implicit enqueueing)");
-
+	typename Traits::Allocator allocator;
 public:
 	// Creates a queue with at least `capacity` element slots; note that the
 	// actual number of elements that can be inserted without additional memory
@@ -737,6 +739,30 @@ public:
 		populate_initial_implicit_producer_hash();
 		populate_initial_block_list(capacity / BLOCK_SIZE + ((capacity & (BLOCK_SIZE - 1)) == 0 ? 0 : 1));
 		
+#ifdef MOODYCAMEL_QUEUE_INTERNAL_DEBUG
+		// Track all the producers using a fully-resolved typed list for
+		// each kind; this makes it possible to debug them starting from
+		// the root queue object (otherwise wacky casts are needed that
+		// don't compile in the debugger's expression evaluator).
+		explicitProducers.store(nullptr, std::memory_order_relaxed);
+		implicitProducers.store(nullptr, std::memory_order_relaxed);
+#endif
+	}
+
+	template<typename Source>
+	explicit ConcurrentQueue(size_t capacity = 6 * BLOCK_SIZE, Source* const resource = nullptr)
+		:
+		allocator(resource),
+		producerListTail(nullptr),
+		producerCount(0),
+		initialBlockPoolIndex(0),
+		nextExplicitConsumerId(0),
+		globalExplicitConsumerOffset(0)
+	{
+		implicitProducerHashResizeInProgress.clear(std::memory_order_relaxed);
+		populate_initial_implicit_producer_hash();
+		populate_initial_block_list(capacity / BLOCK_SIZE + ((capacity & (BLOCK_SIZE - 1)) == 0 ? 0 : 1));
+
 #ifdef MOODYCAMEL_QUEUE_INTERNAL_DEBUG
 		// Track all the producers using a fully-resolved typed list for
 		// each kind; this makes it possible to debug them starting from
@@ -780,7 +806,7 @@ public:
 			if (ptr->token != nullptr) {
 				ptr->token->producer = nullptr;
 			}
-			destroy(ptr);
+			destroy(this->allocator, ptr);
 			ptr = next;
 		}
 		
@@ -794,7 +820,7 @@ public:
 						hash->entries[i].~ImplicitProducerKVP();
 					}
 					hash->~ImplicitProducerHash();
-					(Traits::free)(hash);
+					(Traits::free)(allocator, hash);
 				}
 				hash = prev;
 			}
@@ -805,13 +831,13 @@ public:
 		while (block != nullptr) {
 			auto next = block->freeListNext.load(std::memory_order_relaxed);
 			if (block->dynamicallyAllocated) {
-				destroy(block);
+				destroy(allocator, block);
 			}
 			block = next;
 		}
 		
 		// Destroy initial free list
-		destroy_array(initialBlockPool, initialBlockPoolSize);
+		destroy_array(allocator, initialBlockPool, initialBlockPoolSize);
 	}
 
 	// Disable copying and copy assignment
@@ -1760,7 +1786,7 @@ private:
 				do {
 					auto nextBlock = block->next;
 					if (block->dynamicallyAllocated) {
-						destroy(block);
+						destroy(this->parent->allocator, block);
 					}
 					else {
 						this->parent->add_block_to_free_list(block);
@@ -1774,7 +1800,7 @@ private:
 			while (header != nullptr) {
 				auto prev = static_cast<BlockIndexHeader*>(header->prev);
 				header->~BlockIndexHeader();
-				(Traits::free)(header);
+				(Traits::free)(this->parent->allocator, header);
 				header = prev;
 			}
 		}
@@ -2282,7 +2308,7 @@ private:
 			
 			// Create the new block
 			pr_blockIndexSize <<= 1;
-			auto newRawPtr = static_cast<char*>((Traits::malloc)(sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize));
+			auto newRawPtr = static_cast<char*>((Traits::malloc)(this->parent->allocator, sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize));
 			if (newRawPtr == nullptr) {
 				pr_blockIndexSize >>= 1;		// Reset to allow graceful retry
 				return false;
@@ -2400,7 +2426,7 @@ private:
 				do {
 					auto prev = localBlockIndex->prev;
 					localBlockIndex->~BlockIndexHeader();
-					(Traits::free)(localBlockIndex);
+					(Traits::free)(parent->allocator, localBlockIndex);
 					localBlockIndex = prev;
 				} while (localBlockIndex != nullptr);
 			}
@@ -2878,7 +2904,7 @@ private:
 			auto prev = blockIndex.load(std::memory_order_relaxed);
 			size_t prevCapacity = prev == nullptr ? 0 : prev->capacity;
 			auto entryCount = prev == nullptr ? nextBlockIndexCapacity : prevCapacity;
-			auto raw = static_cast<char*>((Traits::malloc)(
+			auto raw = static_cast<char*>((Traits::malloc)(this->parent->allocator,
 				sizeof(BlockIndexHeader) +
 				std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * entryCount +
 				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity));
@@ -2954,7 +2980,7 @@ private:
 			return;
 		}
 		
-		initialBlockPool = create_array<Block>(blockCount);
+		initialBlockPool = create_array<Block>(allocator, blockCount);
 		if (initialBlockPool == nullptr) {
 			initialBlockPoolSize = 0;
 		}
@@ -3011,7 +3037,7 @@ private:
 		}
 		
 		if (canAlloc == CanAlloc) {
-			return create<Block>();
+			return create<Block>(allocator);
 		}
 		
 		return nullptr;
@@ -3152,7 +3178,7 @@ private:
 		}
 		
 		recycled = false;
-		return add_producer(isExplicit ? static_cast<ProducerBase*>(create<ExplicitProducer>(this)) : create<ImplicitProducer>(this));
+		return add_producer(isExplicit ? static_cast<ProducerBase*>(create<ExplicitProducer>(allocator, this)) : create<ImplicitProducer>(allocator, this));
 	}
 	
 	ProducerBase* add_producer(ProducerBase* producer)
@@ -3369,7 +3395,7 @@ private:
 					while (newCount >= (newCapacity >> 1)) {
 						newCapacity <<= 1;
 					}
-					auto raw = static_cast<char*>((Traits::malloc)(sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity));
+					auto raw = static_cast<char*>((Traits::malloc)(allocator, sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity));
 					if (raw == nullptr) {
 						// Allocation failed
 						implicitProducerHashCount.fetch_sub(1, std::memory_order_relaxed);
@@ -3490,10 +3516,10 @@ private:
 	//////////////////////////////////
 	
 	template<typename U>
-	static inline U* create_array(size_t count)
+	static inline U* create_array(typename Traits::Allocator& allocator, size_t count)
 	{
 		assert(count > 0);
-		auto p = static_cast<U*>((Traits::malloc)(sizeof(U) * count));
+		auto p = static_cast<U*>((Traits::malloc)(allocator, sizeof(U) * count));
 		if (p == nullptr) {
 			return nullptr;
 		}
@@ -3505,38 +3531,38 @@ private:
 	}
 	
 	template<typename U>
-	static inline void destroy_array(U* p, size_t count)
+	static inline void destroy_array(typename Traits::Allocator& allocator, U* p, size_t count)
 	{
 		if (p != nullptr) {
 			assert(count > 0);
 			for (size_t i = count; i != 0; ) {
 				(p + --i)->~U();
 			}
-			(Traits::free)(p);
+			(Traits::free)(allocator, p);
 		}
 	}
 	
 	template<typename U>
-	static inline U* create()
+	static inline U* create(typename Traits::Allocator& allocator)
 	{
-		auto p = (Traits::malloc)(sizeof(U));
+		auto p = (Traits::malloc)(allocator, sizeof(U));
 		return p != nullptr ? new (p) U : nullptr;
 	}
 	
 	template<typename U, typename A1>
-	static inline U* create(A1&& a1)
+	static inline U* create(typename Traits::Allocator& allocator, A1&& a1)
 	{
-		auto p = (Traits::malloc)(sizeof(U));
+		auto p = (Traits::malloc)(allocator, sizeof(U));
 		return p != nullptr ? new (p) U(std::forward<A1>(a1)) : nullptr;
 	}
 	
 	template<typename U>
-	static inline void destroy(U* p)
+	static inline void destroy(typename Traits::Allocator& allocator, U* p)
 	{
 		if (p != nullptr) {
 			p->~U();
 		}
-		(Traits::free)(p);
+		(Traits::free)(allocator, p);
 	}
 
 private:
