@@ -311,6 +311,10 @@ namespace details {
 	} max_align_t;
 }
 
+#ifndef MOODYCAMEL_DYNAMIC_CAST
+#define MOODYCAMEL_DYNAMIC_CAST dynamic_cast
+#endif
+
 // Default traits for the ConcurrentQueue. To change some of the
 // traits without re-implementing all of them, inherit from this
 // struct and shadow the declarations you wish to be different;
@@ -380,28 +384,6 @@ struct ConcurrentQueueDefaultTraits
 	// consumer threads exceeds the number of idle cores (in which case try 0-100).
 	// Only affects instances of the BlockingConcurrentQueue.
 	static const int MAX_SEMA_SPINS = 10000;
-	
-	
-#ifndef MCDBGQ_USE_RELACY
-	// Memory allocation can be customized if needed.
-	// malloc should return nullptr on failure, and handle alignment like std::malloc.
-#if defined(malloc) || defined(free)
-	// Gah, this is 2015, stop defining macros that break standard code already!
-	// Work around malloc/free being special macros:
-	static inline void* WORKAROUND_malloc(size_t size) { return malloc(size); }
-	static inline void WORKAROUND_free(void* ptr) { return free(ptr); }
-	static inline void* (malloc)(size_t size) { return WORKAROUND_malloc(size); }
-	static inline void (free)(void* ptr) { return WORKAROUND_free(ptr); }
-#else
-	static inline void* malloc(Allocator& allocator, size_t size) { return allocator.allocate(size); }
-	static inline void free(Allocator& allocator, void* ptr) { return allocator.deallocate(reinterpret_cast<char*>(ptr), 1); }
-#endif
-#else
-	// Debug versions when running under the Relacy race detector (ignore
-	// these in user code)
-	static inline void* malloc(size_t size) { return rl::rl_malloc(size, $); }
-	static inline void free(void* ptr) { return rl::rl_free(ptr, $); }
-#endif
 };
 
 
@@ -883,7 +865,7 @@ public:
 						hash->entries[i].~ImplicitProducerKVP();
 					}
 					hash->~ImplicitProducerHash();
-					(Traits::free)(allocator, hash);
+					allocator.deallocate(hash, 0);
 				}
 				hash = prev;
 			}
@@ -1851,7 +1833,7 @@ private:
 			while (header != nullptr) {
 				auto prev = static_cast<BlockIndexHeader*>(header->prev);
 				header->~BlockIndexHeader();
-				(Traits::free)(this->parent->allocator, header);
+				this->parent->allocator.deallocate(header, 0);
 				header = prev;
 			}
 		}
@@ -2370,7 +2352,7 @@ private:
 			
 			// Create the new block
 			pr_blockIndexSize <<= 1;
-			auto newRawPtr = static_cast<char*>((Traits::malloc)(this->parent->allocator, sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize));
+			auto newRawPtr = static_cast<char*>(this->parent->allocator.allocate(sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize));
 			if (newRawPtr == nullptr) {
 				pr_blockIndexSize >>= 1;		// Reset to allow graceful retry
 				return false;
@@ -2488,7 +2470,7 @@ private:
 				do {
 					auto prev = localBlockIndex->prev;
 					localBlockIndex->~BlockIndexHeader();
-					(Traits::free)(this->parent->allocator, localBlockIndex);
+					this->parent->allocator.deallocate(localBlockIndex, 0);
 					localBlockIndex = prev;
 				} while (localBlockIndex != nullptr);
 			}
@@ -2977,7 +2959,7 @@ private:
 			auto prev = blockIndex.load(std::memory_order_relaxed);
 			size_t prevCapacity = prev == nullptr ? 0 : prev->capacity;
 			auto entryCount = prev == nullptr ? nextBlockIndexCapacity : prevCapacity;
-			auto raw = static_cast<char*>((Traits::malloc)(this->parent->allocator,
+			auto raw = static_cast<char*>(this->parent->allocator.allocate(
 				sizeof(BlockIndexHeader) +
 				std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * entryCount +
 				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity));
@@ -3151,7 +3133,7 @@ private:
 				}
 				
 				for (auto ptr = q->producerListTail.load(std::memory_order_acquire); ptr != nullptr; ptr = ptr->next_prod()) {
-					bool implicit = dynamic_cast<ImplicitProducer*>(ptr) != nullptr;
+					bool implicit = MOODYCAMEL_DYNAMIC_CAST<ImplicitProducer*>(ptr) != nullptr;
 					stats.implicitProducers += implicit ? 1 : 0;
 					stats.explicitProducers += implicit ? 0 : 1;
 					
@@ -3476,7 +3458,7 @@ private:
 					while (newCount >= (newCapacity >> 1)) {
 						newCapacity <<= 1;
 					}
-					auto raw = static_cast<char*>((Traits::malloc)(allocator, sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity));
+					auto raw = static_cast<char*>(allocator.allocate(sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity));
 					if (raw == nullptr) {
 						// Allocation failed
 						implicitProducerHashCount.fetch_sub(1, std::memory_order_relaxed);
@@ -3596,31 +3578,6 @@ private:
 	// Utility functions
 	//////////////////////////////////
 
-	template<typename TAlign>
-	static inline void* aligned_malloc(size_t size)
-	{
-		MOODYCAMEL_CONSTEXPR_IF (std::alignment_of<TAlign>::value <= std::alignment_of<details::max_align_t>::value)
-			return (Traits::malloc)(size);
-		else {
-			size_t alignment = std::alignment_of<TAlign>::value;
-			void* raw = (Traits::malloc)(size + alignment - 1 + sizeof(void*));
-			if (!raw)
-				return nullptr;
-			char* ptr = details::align_for<TAlign>(reinterpret_cast<char*>(raw) + sizeof(void*));
-			*(reinterpret_cast<void**>(ptr) - 1) = raw;
-			return ptr;
-		}
-	}
-
-	template<typename TAlign>
-	static inline void aligned_free(void* ptr)
-	{
-		MOODYCAMEL_CONSTEXPR_IF (std::alignment_of<TAlign>::value <= std::alignment_of<details::max_align_t>::value)
-			return (Traits::free)(ptr);
-		else
-			(Traits::free)(ptr ? *(reinterpret_cast<void**>(ptr) - 1) : nullptr);
-	}
-
 	template<typename U>
 	static inline U* create_array(typename Traits::Allocator& allocator, size_t count)
 	{
@@ -3651,7 +3608,7 @@ private:
 	static inline U* create(typename Traits::Allocator& allocator)
 	{
 		typename Traits::Allocator::template rebind<U>::other a(allocator);
-		void* p = a.allocate(1));
+		void* p = a.allocate(1);
 		return p != nullptr ? new (p) U : nullptr;
 	}
 
@@ -3659,7 +3616,7 @@ private:
 	static inline U* create(typename Traits::Allocator& allocator, A1&& a1)
 	{
 		typename Traits::Allocator::template rebind<U>::other a(allocator);
-		void* p = a.allocate(1));
+		void* p = a.allocate(1);
 		return p != nullptr ? new (p) U(std::forward<A1>(a1)) : nullptr;
 	}
 
