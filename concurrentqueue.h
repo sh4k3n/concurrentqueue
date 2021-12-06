@@ -3582,6 +3582,7 @@ private:
 	static inline U* create_array(typename Traits::Allocator& allocator, size_t count)
 	{
 		assert(count > 0);
+		static_assert(sizeof(typename Traits::Allocator::value_type) == 1, "Allocator must be byte allocator");
 		typename Traits::Allocator::template rebind<U>::other a(allocator);
 		U* p = static_cast<U*>(a.allocate(count));
 		if (p == nullptr)
