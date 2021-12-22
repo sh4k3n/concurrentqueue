@@ -2352,7 +2352,15 @@ private:
 			
 			// Create the new block
 			pr_blockIndexSize <<= 1;
-			auto newRawPtr = static_cast<char*>(this->parent->allocator.allocate(sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize));
+
+			typename Traits::Allocator::template rebind<size_t>::other blockIndexAllocator(this->parent->allocator);
+			size_t allocSize = sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize;
+			if (allocSize % sizeof(size_t) != 0)
+			{
+				allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
+			}
+			auto newRawPtr = reinterpret_cast<char*>(blockIndexAllocator.allocate(allocSize/sizeof(size_t)));
+				
 			if (newRawPtr == nullptr) {
 				pr_blockIndexSize >>= 1;		// Reset to allow graceful retry
 				return false;
@@ -2959,10 +2967,17 @@ private:
 			auto prev = blockIndex.load(std::memory_order_relaxed);
 			size_t prevCapacity = prev == nullptr ? 0 : prev->capacity;
 			auto entryCount = prev == nullptr ? nextBlockIndexCapacity : prevCapacity;
-			auto raw = static_cast<char*>(this->parent->allocator.allocate(
-				sizeof(BlockIndexHeader) +
+
+			typename Traits::Allocator::template rebind<size_t>::other blockIndexAllocator(this->parent->allocator);
+			size_t allocSize = sizeof(BlockIndexHeader) +
 				std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * entryCount +
-				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity));
+				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity;
+			if (allocSize % sizeof(size_t) != 0)
+			{
+				allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
+			}
+
+			auto raw = reinterpret_cast<char*>(blockIndexAllocator.allocate(allocSize / sizeof(size_t)));
 			if (raw == nullptr) {
 				return false;
 			}
@@ -3458,7 +3473,15 @@ private:
 					while (newCount >= (newCapacity >> 1)) {
 						newCapacity <<= 1;
 					}
-					auto raw = static_cast<char*>(allocator.allocate(sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity));
+
+					typename Traits::Allocator::template rebind<size_t>::other implicitProducedAllocator(allocator);
+					size_t allocSize = sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity;
+					if (allocSize % sizeof(size_t) != 0)
+					{
+						allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
+					}
+
+					auto raw = reinterpret_cast<char*>(implicitProducedAllocator.allocate(allocSize / sizeof(size_t)));
 					if (raw == nullptr) {
 						// Allocation failed
 						implicitProducerHashCount.fetch_sub(1, std::memory_order_relaxed);
