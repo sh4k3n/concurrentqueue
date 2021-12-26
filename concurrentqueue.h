@@ -463,11 +463,23 @@ namespace details
 #endif
 	}
 	
+	inline size_t align_size(size_t pos, size_t alignment)
+	{
+		auto offset = (-pos & (alignment - 1));
+		return offset + pos;
+	}
+
+	template<typename PtrType>
+	inline PtrType align_ptr(const PtrType pos, const size_t alignment)
+	{
+		return (pos + (alignment - 1)) & -alignment;
+	}
+
 	template<typename U>
 	static inline char* align_for(char* ptr)
 	{
 		const std::size_t alignment = std::alignment_of<U>::value;
-		return ptr + (alignment - (reinterpret_cast<std::uintptr_t>(ptr) % alignment)) % alignment;
+		return reinterpret_cast<char*>(align_ptr(reinterpret_cast<uintptr_t>(ptr), alignment));
 	}
 
 	template<typename T>
@@ -2345,7 +2357,6 @@ private:
 			void* prev;
 		};
 		
-		
 		bool new_block_index(size_t numberOfFilledSlotsToExpose)
 		{
 			auto prevBlockSizeMask = pr_blockIndexSize - 1;
@@ -2354,11 +2365,7 @@ private:
 			pr_blockIndexSize <<= 1;
 
 			typename Traits::Allocator::template rebind<size_t>::other blockIndexAllocator(this->parent->allocator);
-			size_t allocSize = sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize;
-			if (allocSize % sizeof(size_t) != 0)
-			{
-				allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
-			}
+			size_t allocSize = details::align_size(sizeof(BlockIndexHeader) + std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * pr_blockIndexSize, sizeof(size_t));
 			auto newRawPtr = reinterpret_cast<char*>(blockIndexAllocator.allocate(allocSize/sizeof(size_t)));
 				
 			if (newRawPtr == nullptr) {
@@ -2971,13 +2978,9 @@ private:
 			auto entryCount = prev == nullptr ? nextBlockIndexCapacity : prevCapacity;
 
 			typename Traits::Allocator::template rebind<size_t>::other blockIndexAllocator(this->parent->allocator);
-			size_t allocSize = sizeof(BlockIndexHeader) +
+			size_t allocSize = details::align_size(sizeof(BlockIndexHeader) +
 				std::alignment_of<BlockIndexEntry>::value - 1 + sizeof(BlockIndexEntry) * entryCount +
-				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity;
-			if (allocSize % sizeof(size_t) != 0)
-			{
-				allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
-			}
+				std::alignment_of<BlockIndexEntry*>::value - 1 + sizeof(BlockIndexEntry*) * nextBlockIndexCapacity, sizeof(size_t));
 
 			auto raw = reinterpret_cast<char*>(blockIndexAllocator.allocate(allocSize / sizeof(size_t)));
 			if (raw == nullptr) {
@@ -3477,11 +3480,7 @@ private:
 					}
 
 					typename Traits::Allocator::template rebind<size_t>::other implicitProducedAllocator(allocator);
-					size_t allocSize = sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity;
-					if (allocSize % sizeof(size_t) != 0)
-					{
-						allocSize += sizeof(size_t) - (allocSize % sizeof(size_t));
-					}
+					size_t allocSize = details::align_size(sizeof(ImplicitProducerHash) + std::alignment_of<ImplicitProducerKVP>::value - 1 + sizeof(ImplicitProducerKVP) * newCapacity, sizeof(size_t));
 
 					auto raw = reinterpret_cast<char*>(implicitProducedAllocator.allocate(allocSize / sizeof(size_t)));
 					if (raw == nullptr) {
