@@ -324,8 +324,6 @@ namespace details {
 // otherwise.
 struct ConcurrentQueueDefaultTraits
 {
-	using Allocator = std::allocator<char>;
-	
 	// General-purpose size type. std::size_t is strongly recommended.
 	typedef std::size_t size_t;
 	
@@ -402,17 +400,26 @@ struct ConcurrentQueueDefaultTraits
 	// Work around malloc/free being special macros:
 	static inline void* WORKAROUND_malloc(size_t size) { return malloc(size); }
 	static inline void WORKAROUND_free(void* ptr) { return free(ptr); }
-	static inline void* (malloc)(size_t size) { return WORKAROUND_malloc(size); }
-	static inline void (free)(void* ptr) { return WORKAROUND_free(ptr); }
+	struct Allocator 
+	{
+		void* allocate(size_t size) {return WORKAROUND_malloc(size);}
+		void deallocate(void* ptr) { WORKAROUND_free(ptr);}
+	};
 #else
-	static inline void* malloc(size_t size) { return std::malloc(size); }
-	static inline void free(void* ptr) { return std::free(ptr); }
+	struct Allocator 
+	{
+		void* allocate(size_t size) {return std::malloc(size);}
+		void deallocate(void* ptr) { std::free(ptr);}
+	};
 #endif
 #else
 	// Debug versions when running under the Relacy race detector (ignore
 	// these in user code)
-	static inline void* malloc(size_t size) { return rl::rl_malloc(size, $); }
-	static inline void free(void* ptr) { return rl::rl_free(ptr, $); }
+	struct Allocator
+	{
+		void* allocate(size_t size) { return rl::rl_malloc(size, $);}
+		void deallocate(void* ptr) { rl::rl_free(ptr, $);}
+	};
 #endif
 };
 
