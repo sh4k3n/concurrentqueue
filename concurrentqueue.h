@@ -3118,7 +3118,7 @@ private:
 		block->owner = nullptr;
 #endif
 		if (!Traits::RECYCLE_ALLOCATED_BLOCKS && block->dynamicallyAllocated) {
-			destroy(block);
+			destroy(allocator, block);
 		}
 		else {
 			freeList.add(block);
@@ -3287,7 +3287,7 @@ private:
 				}
 			}
 		}
-		return add_producer(isExplicit ? static_cast<ProducerBase*>(create<ExplicitProducer>(this)) : create<ImplicitProducer>(this));
+		return add_producer(isExplicit ? static_cast<ProducerBase*>(create<ExplicitProducer>(allocator, this)) : create<ImplicitProducer>(allocator, this));
 	}
 	
 	ProducerBase* add_producer(ProducerBase* producer)
