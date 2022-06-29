@@ -159,6 +159,12 @@ namespace moodycamel { namespace details {
 } }
 #endif
 
+#if __cplusplus >= 202002L
+#define MOODYCAMEL_NO_UNIQUE_ADDRESS [[no_unique_address]]		
+#else
+#define MOODYCAMEL_NO_UNIQUE_ADDRESS
+#endif
+
 // Constexpr if
 #ifndef MOODYCAMEL_CONSTEXPR_IF
 #if (defined(_MSC_VER) && defined(_HAS_CXX17) && _HAS_CXX17) || __cplusplus > 201402L
@@ -3716,7 +3722,7 @@ private:
 	std::atomic<ExplicitProducer*> explicitProducers;
 	std::atomic<ImplicitProducer*> implicitProducers;
 #endif
-	typename Traits::Allocator allocator;
+	MOODYCAMEL_NO_UNIQUE_ADDRESS typename Traits::Allocator allocator;
 };
 
 
